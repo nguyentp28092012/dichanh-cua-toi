@@ -8,17 +8,17 @@ from docx import Document
 from pptx import Presentation
 import pdfplumber
 from fpdf import FPDF
-import easyocr
+import pytesseract
 import os
 from io import BytesIO
+
+# Cấu hình Tesseract (Render có sẵn)
+pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
 
 app = Flask(__name__)
 CORS(app)
 
-# Khởi tạo EasyOCR (chỉ chạy 1 lần)
-reader = easyocr.Reader(['en', 'vi'], gpu=False)
-
-# Hàm dịch văn bản bằng deep-translator
+# Hàm dịch
 def translate_text(text, target='vi'):
     if not text.strip():
         return text
@@ -37,16 +37,14 @@ def translate_image():
     file = request.files['file']
     target_lang = request.form.get('lang', 'vi')
     
-    # Đọc ảnh
     filestr = file.read()
     npimg = np.frombuffer(filestr, np.uint8)
     img = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
     
-    # OCR
-    result = reader.readtext(img, detail=0, paragraph=True)
-    ocr_text = "\n".join(result)
+    # Dùng pytesseract
+    custom_config = r'--oem 3 --psm 6'
+    ocr_text = pytesseract.image_to_string(img, lang='eng+vie', config=custom_config)
     
-    # Dịch
     translated = translate_text(ocr_text, target_lang)
     
     return jsonify({
@@ -54,136 +52,81 @@ def translate_image():
         "translated": translated
     })
 
-# === 2. DỊCH FILE WORD (.	docx) ===
+# === CÁC HÀM KHÁC GIỮ NGUYÊN ===
 @app.route('/translate-docx', methods=['POST'])
 def translate_docx():
     if 'file' not in request.files:
         return jsonify({"error": "Không có file"}), 400
-    
     file = request.files['file']
     target_lang = request.form.get('lang', 'vi')
-    
     doc = Document(file)
-    full_text = []
-    for para in doc.paragraphs:
-        if para.text.strip():
-            full_text.append(para.text)
-    
+    full_text = [para.text for para in doc.paragraphs if para.text.strip()]
     original = "\n".join(full_text)
     translated = translate_text(original, target_lang)
-    
-    return jsonify({
-        "original": original,
-        "translated": translated
-    })
+    return jsonify({"original": original, "translated": translated})
 
-# === 3. DỊCH FILE POWERPOINT (.pptx) ===
 @app.route('/translate-pptx', methods=['POST'])
 def translate_pptx():
     if 'file' not in request.files:
         return jsonify({"error": "Không có file"}), 400
-    
     file = request.files['file']
     target_lang = request.form.get('lang', 'vi')
-    
     prs = Presentation(file)
     full_text = []
     for slide in prs.slides:
         for shape in slide.shapes:
-            if hasattr(shape, "text"):
-                if shape.text.strip():
-                    full_text.append(shape.text)
-    
+            if hasattr(shape, "text") and shape.text.strip():
+                full_text.append(shape.text)
     original = "\n".join(full_text)
     translated = translate_text(original, target_lang)
-    
-    return jsonify({
-        "original": original,
-        "translated": translated
-    })
+    return jsonify({"original": original, "translated": translated})
 
-# === 4. DỊCH FILE PDF ===
 @app.route('/translate-pdf', methods=['POST'])
 def translate_pdf():
     if 'file' not in request.files:
         return jsonify({"error": "Không có file"}), 400
-    
     file = request.files['file']
     target_lang = request.form.get('lang', 'vi')
-    
     full_text = ""
     with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
             text = page.extract_text()
             if text:
                 full_text += text + "\n"
-    
     translated = translate_text(full_text, target_lang)
-    
-    return jsonify({
-        "original": full_text,
-        "translated": translated
-    })
+    return jsonify({"original": full_text, "translated": translated})
 
-# === 5. DỊCH VĂN BẢN THƯỜNG ===
 @app.route('/translate-text', methods=['POST'])
 def translate_text_endpoint():
     data = request.get_json()
     if not data or 'text' not in data:
         return jsonify({"error": "Không có văn bản"}), 400
-    
     text = data['text']
     target_lang = data.get('lang', 'vi')
-    
     translated = translate_text(text, target_lang)
-    
-    return jsonify({
-        "original": text,
-        "translated": translated
-    })
+    return jsonify({"original": text, "translated": translated})
 
-# === 6. XUẤT FILE PDF ĐÃ DỊCH ===
 @app.route('/export-pdf', methods=['POST'])
 def export_pdf():
     data = request.get_json()
     if not data or 'text' not in data:
         return jsonify({"error": "Không có văn bản"}), 400
-    
     text = data['text']
-    
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", size=12)
-    
-    # Thêm văn bản (xử lý Unicode)
     for line in text.split('\n'):
         pdf.cell(200, 10, txt=line.encode('latin-1', 'replace').decode('latin-1'), ln=1)
-    
     output = BytesIO()
     pdf.output(output)
     output.seek(0)
-    
-    return send_file(
-        output,
-        mimetype='application/pdf',
-        as_attachment=True,
-        download_name='translated.pdf'
-    )
+    return send_file(output, mimetype='application/pdf', as_attachment=True, download_name='translated.pdf')
 
-# === TRANG CHỦ ===
 @app.route('/')
 def home():
     return """
     <h1>Dịch Ảnh Của Tôi - API</h1>
-    <p>Các endpoint:</p>
-    <ul>
-        <li>POST /translate-image (file + lang)</li>
-        <li>POST /translate-docx</li>
-        <li>POST /translate-pptx</li>
-        <li>POST /translate-pdf</li>
-        <li>POST /translate-text (JSON: {"text": "...", "lang": "vi"})</li>
-        <li>POST /export-pdf (JSON: {"text": "..."})</li>
-    </ul>
+    <p>Dùng pytesseract + deep-translator</p>
     """
 
 if __name__ == '__main__':
